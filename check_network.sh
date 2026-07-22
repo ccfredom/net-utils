@@ -21,6 +21,7 @@ PING_TARGETS=(
 )
 
 MTR_TARGET="202.96.209.133"   # 路由跟踪目标，可换成你的常用出口
+MTR_TCP_PORT=443               # TCP 探测端口，避开 ICMP 限速/丢包干扰，可按需换成目标开放的端口
 PING_COUNT=20
 OUTPUT_FILE="network_report_$(date +%Y%m%d_%H%M%S).txt"
 
@@ -80,10 +81,11 @@ for target in "${PING_TARGETS[@]}"; do
 done
 
 # 3. 路由跟踪 (mtr，比 traceroute 更能体现丢包和延迟分布)
-divider "3. 路由质量分析 (mtr -> $MTR_TARGET)"
+divider "3. 路由质量分析 (mtr --tcp -> $MTR_TARGET:$MTR_TCP_PORT)"
 check_and_install mtr mtr-tiny
 if command -v mtr >/dev/null 2>&1; then
-  mtr -r -c 20 --no-dns "$MTR_TARGET" 2>&1 | tee -a "$OUTPUT_FILE"
+  # --tcp 避免中间/末端路由器对 ICMP 限速导致的假性丢包，更接近真实业务层表现
+  mtr -r -c 20 --no-dns --tcp -P "$MTR_TCP_PORT" "$MTR_TARGET" 2>&1 | tee -a "$OUTPUT_FILE"
 else
   log "[跳过] mtr 未安装成功，改用 traceroute"
   if command -v traceroute >/dev/null 2>&1; then
@@ -103,14 +105,25 @@ else
   log "[跳过] dig 未安装，无法测试 DNS 解析速度"
 fi
 
-# 5. 带宽测速
-divider "5. 带宽测速 (speedtest-cli)"
+# 5. 带宽测速 (指定中国大陆节点，而非默认就近节点)
+divider "5. 带宽测速 (speedtest-cli -> 中国大陆节点)"
 check_and_install speedtest-cli speedtest-cli
 if command -v speedtest-cli >/dev/null 2>&1; then
-  speedtest-cli --simple 2>&1 | tee -a "$OUTPUT_FILE"
+  # speedtest-cli 默认自动选延迟最低的节点，不一定在中国大陆；
+  # 这里从服务器列表里筛出国家码为 CN 的节点，强制指定测速目标
+  CN_SERVER_LINE=$(speedtest-cli --list 2>/dev/null | grep -E ", CN\)" | head -n 1)
+  CN_SERVER_ID=$(echo "$CN_SERVER_LINE" | awk -F')' '{print $1}' | tr -d ' ')
+  if [ -n "$CN_SERVER_ID" ]; then
+    log "选定中国大陆测速节点: $CN_SERVER_LINE"
+    speedtest-cli --server "$CN_SERVER_ID" --simple 2>&1 | tee -a "$OUTPUT_FILE"
+  else
+    log "[警告] 服务器列表中未找到中国大陆 (CN) 节点，可能是该节点当前不对外开放测速"
+    log "        改用默认最近节点测速（结果不代表到中国大陆的真实速度）:"
+    speedtest-cli --simple 2>&1 | tee -a "$OUTPUT_FILE"
+  fi
 else
   log "[跳过] speedtest-cli 未安装成功。可手动运行:"
-  log "  pip install speedtest-cli --break-system-packages && speedtest-cli --simple"
+  log "  pip install speedtest-cli --break-system-packages && speedtest-cli --list | grep ', CN)'"
 fi
 
 # 6. 关键端口连通性检测（按需修改为你的代理端口）
