@@ -21,7 +21,6 @@ PING_TARGETS=(
 )
 
 MTR_TARGET="202.96.209.133"   # 路由跟踪目标，可换成你的常用出口
-MTR_TCP_PORT=443               # TCP 探测端口，避开 ICMP 限速/丢包干扰，可按需换成目标开放的端口
 PING_COUNT=20
 OUTPUT_FILE="network_report_$(date +%Y%m%d_%H%M%S).txt"
 
@@ -81,11 +80,10 @@ for target in "${PING_TARGETS[@]}"; do
 done
 
 # 3. 路由跟踪 (mtr，比 traceroute 更能体现丢包和延迟分布)
-divider "3. 路由质量分析 (mtr --tcp -> $MTR_TARGET:$MTR_TCP_PORT)"
+divider "3. 路由质量分析 (mtr -> $MTR_TARGET)"
 check_and_install mtr mtr-tiny
 if command -v mtr >/dev/null 2>&1; then
-  # --tcp 避免中间/末端路由器对 ICMP 限速导致的假性丢包，更接近真实业务层表现
-  mtr -r -c 20 --no-dns --tcp -P "$MTR_TCP_PORT" "$MTR_TARGET" 2>&1 | tee -a "$OUTPUT_FILE"
+  mtr -r -c 20 --no-dns "$MTR_TARGET" 2>&1 | tee -a "$OUTPUT_FILE"
 else
   log "[跳过] mtr 未安装成功，改用 traceroute"
   if command -v traceroute >/dev/null 2>&1; then
