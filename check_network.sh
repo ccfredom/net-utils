@@ -10,8 +10,8 @@
 # 可选依赖（脚本会自动尝试安装缺失工具，Debian/Ubuntu系）：
 #   mtr-tiny, iperf3, dig(bind9-dnsutils)
 #
-# 带宽测速（iperf3）需要自建服务器：在国内一台可公网访问的机器上运行 `iperf3 -s -D`，
-# 再通过环境变量 IPERF3_SERVER="服务器IP[:端口]" 指定测速目标
+# 带宽测速（iperf3）：本脚本会在本机（VPS）启动 iperf3 服务端并常驻后台，
+# 由国内的另一台设备主动发起 iperf3 客户端连接来测速（反向路径更容易获得真实的国内测速节点）
 
 set -uo pipefail
 
@@ -30,9 +30,8 @@ OUTPUT_FILE="network_report_$(date +%Y%m%d_%H%M%S).txt"
 # ICMP 不通时，用于判断是否只是 ICMP 被屏蔽（而非真实不可达）的 TCP 探测端口
 TCP_CHECK_PORTS=(443 80)
 
-# iperf3 测速服务器：需要自建，在一台国内可公网访问的服务器上运行 `iperf3 -s -D` 常驻，
-# 格式 "主机[:端口]"（端口默认 5201），留空则跳过带宽测速
-IPERF3_SERVER="${IPERF3_SERVER:-}"
+# iperf3 服务端监听端口，需要在安全组/防火墙放行该端口（TCP，若测 UDP 还需放行 UDP）
+IPERF3_PORT="${IPERF3_PORT:-5201}"
 
 # ========== 工具函数 ==========
 log() {
@@ -104,20 +103,6 @@ fetch_public_ipv6() {
 tcp_check() {
   local ip="$1" port="$2" timeout_s="${3:-3}"
   timeout "$timeout_s" bash -c "cat < /dev/null > /dev/tcp/${ip}/${port}" 2>/dev/null
-}
-
-# 跑一次 iperf3 测试并记录结果；extra_args 用于传 -R 等反向测速参数
-run_iperf3() {
-  local host="$1" port="$2" extra_args="$3" label="$4"
-  local result
-  log "\n-- $label --"
-  result=$(iperf3 -c "$host" -p "$port" -t 10 $extra_args 2>&1)
-  if [ $? -eq 0 ]; then
-    echo "$result" | grep -E "sender|receiver" | tee -a "$OUTPUT_FILE"
-  else
-    log "[失败] 连接 iperf3 服务器 $host:$port 失败"
-    echo "$result" | tail -3 | tee -a "$OUTPUT_FILE"
-  fi
 }
 
 # ========== 开始检测 ==========
@@ -205,26 +190,27 @@ else
   log "[跳过] dig 未安装，无法测试 DNS 解析速度"
 fi
 
-# 5. 带宽测速 (iperf3 -> 自建国内服务器)
-divider "5. 带宽测速 (iperf3)"
-if [ -z "$IPERF3_SERVER" ]; then
-  log "[跳过] 未配置 IPERF3_SERVER。需要一台可公网访问、已运行 'iperf3 -s -D' 的国内服务器，"
-  log "        然后设置环境变量 IPERF3_SERVER=\"服务器IP[:端口]\"（端口默认 5201）后重新运行本脚本"
-else
-  check_and_install iperf3 iperf3
-  if command -v iperf3 >/dev/null 2>&1; then
-    IPERF3_HOST="${IPERF3_SERVER%%:*}"
-    if [[ "$IPERF3_SERVER" == *:* ]]; then
-      IPERF3_PORT="${IPERF3_SERVER##*:}"
-    else
-      IPERF3_PORT=5201
-    fi
-    log "目标服务器: $IPERF3_HOST:$IPERF3_PORT"
-    run_iperf3 "$IPERF3_HOST" "$IPERF3_PORT" "" "上行 (VPS -> 服务器)"
-    run_iperf3 "$IPERF3_HOST" "$IPERF3_PORT" "-R" "下行 (服务器 -> VPS)"
+# 5. 带宽测速 (iperf3 服务端，等待国内客户端连接测速)
+divider "5. 带宽测速 (iperf3 服务端)"
+check_and_install iperf3 iperf3
+if command -v iperf3 >/dev/null 2>&1; then
+  if pgrep -f "iperf3 -s" >/dev/null 2>&1; then
+    log "[OK] iperf3 服务端已在运行"
   else
-    log "[跳过] iperf3 未安装成功。可手动运行: apt-get install -y iperf3 / yum install -y iperf3"
+    iperf3 -s -D -p "$IPERF3_PORT" >/dev/null 2>&1
+    sleep 1
+    if pgrep -f "iperf3 -s" >/dev/null 2>&1; then
+      log "[OK] 已启动 iperf3 服务端，监听端口 $IPERF3_PORT"
+    else
+      log "[失败] iperf3 服务端启动失败，请检查端口 $IPERF3_PORT 是否已被占用"
+    fi
   fi
+  log "请在国内的另一台设备上执行以下命令测速（需先确认云厂商安全组/本机防火墙已放行 TCP ${IPERF3_PORT}）:"
+  log "  上行(国内 -> 本机): iperf3 -c ${PUBLIC_IPV4:-<本机公网IP>} -p $IPERF3_PORT"
+  log "  下行(本机 -> 国内): iperf3 -c ${PUBLIC_IPV4:-<本机公网IP>} -p $IPERF3_PORT -R"
+  log "[提示] 测速结果需要在国内设备一侧查看，本报告不包含自动测速结果"
+else
+  log "[跳过] iperf3 未安装成功。可手动运行: apt-get install -y iperf3 / yum install -y iperf3"
 fi
 
 # 6. 关键端口连通性检测（按需修改为你的代理端口）
