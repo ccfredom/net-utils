@@ -123,7 +123,7 @@ if command -v curl >/dev/null 2>&1; then
   else
     log "[警告] 无法获取出口IP信息，请检查网络连通性"
   fi
-  # ipinfo.io 解析失败时（例如被限流/内容异常），换源重新获取，供后续黑名单检测复用
+  # ipinfo.io 解析失败时（例如被限流/内容异常），换源重新获取，供后续带宽测速展示复用
   if [ -z "$PUBLIC_IPV4" ]; then
     PUBLIC_IPV4=$(fetch_public_ipv4)
   fi
@@ -260,32 +260,6 @@ if command -v curl >/dev/null 2>&1; then
   else
     log "[信息] 未检测到可用 IPv6 出口（或被禁用/无地址；也可能是多个探测源都返回了非 IP 内容，如反爬虫验证页）"
   fi
-fi
-
-# 10. IP 黑名单/信誉检测 (基于 Spamhaus ZEN 的公开 DNSBL 查询，无需 API Key)
-divider "10. IP 黑名单信誉检测 (Spamhaus ZEN)"
-check_and_install dig dnsutils
-if command -v dig >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
-  # 优先复用第1步已获取并校验过的公网 IP，避免重复请求；拿不到时再走 fallback 源
-  if [ -z "${PUBLIC_IPV4:-}" ]; then
-    PUBLIC_IPV4=$(fetch_public_ipv4)
-  fi
-  if [ -n "${PUBLIC_IPV4:-}" ]; then
-    REVERSED_IP=$(echo "$PUBLIC_IPV4" | awk -F. '{print $4"."$3"."$2"."$1}')
-    BL_RESULT=$(dig +short +time=5 +tries=1 "${REVERSED_IP}.zen.spamhaus.org" A 2>/dev/null)
-    if [ -z "$BL_RESULT" ]; then
-      log "[OK] $PUBLIC_IPV4 未在 Spamhaus ZEN 黑名单中"
-    elif [[ "$BL_RESULT" =~ ^127\.0\.0\.[0-9]+$ ]]; then
-      log "[警告] $PUBLIC_IPV4 命中 Spamhaus ZEN 黑名单，返回码: $BL_RESULT"
-      log "      （常见原因：该IP段历史上被用于垃圾邮件/滥用行为，可能影响出口访问某些服务的可信度）"
-    else
-      log "[跳过] Spamhaus 查询返回了非预期结果，判定为检测失败而非命中黑名单（避免误报）: $(echo "$BL_RESULT" | head -c 100)"
-    fi
-  else
-    log "[跳过] 无法获取本机公网IP（多个源均失败），跳过黑名单查询"
-  fi
-else
-  log "[跳过] dig 或 curl 不可用，跳过黑名单查询"
 fi
 
 divider "检测完成"
