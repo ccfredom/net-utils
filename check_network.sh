@@ -8,7 +8,10 @@
 #   ./check_network.sh
 #
 # 可选依赖（脚本会自动尝试安装缺失工具，Debian/Ubuntu系）：
-#   mtr-tiny, speedtest-cli, dig(bind9-dnsutils)
+#   mtr-tiny, iperf3, dig(bind9-dnsutils)
+#
+# 带宽测速（iperf3）需要自建服务器：在国内一台可公网访问的机器上运行 `iperf3 -s -D`，
+# 再通过环境变量 IPERF3_SERVER="服务器IP[:端口]" 指定测速目标
 
 set -uo pipefail
 
@@ -27,9 +30,9 @@ OUTPUT_FILE="network_report_$(date +%Y%m%d_%H%M%S).txt"
 # ICMP 不通时，用于判断是否只是 ICMP 被屏蔽（而非真实不可达）的 TCP 探测端口
 TCP_CHECK_PORTS=(443 80)
 
-# 如果 speedtest-cli 找不到中国大陆节点，可在此手动指定一个国内可公开访问的大文件直链，
-# 脚本会退化为用 curl 直接下载该文件并计算平均速度（例如阿里云OSS/腾讯云COS上的公开测速文件）
-CN_TEST_FILE_URL="${CN_TEST_FILE_URL:-}"
+# iperf3 测速服务器：需要自建，在一台国内可公网访问的服务器上运行 `iperf3 -s -D` 常驻，
+# 格式 "主机[:端口]"（端口默认 5201），留空则跳过带宽测速
+IPERF3_SERVER="${IPERF3_SERVER:-}"
 
 # ========== 工具函数 ==========
 log() {
@@ -101,6 +104,20 @@ fetch_public_ipv6() {
 tcp_check() {
   local ip="$1" port="$2" timeout_s="${3:-3}"
   timeout "$timeout_s" bash -c "cat < /dev/null > /dev/tcp/${ip}/${port}" 2>/dev/null
+}
+
+# 跑一次 iperf3 测试并记录结果；extra_args 用于传 -R 等反向测速参数
+run_iperf3() {
+  local host="$1" port="$2" extra_args="$3" label="$4"
+  local result
+  log "\n-- $label --"
+  result=$(iperf3 -c "$host" -p "$port" -t 10 $extra_args 2>&1)
+  if [ $? -eq 0 ]; then
+    echo "$result" | grep -E "sender|receiver" | tee -a "$OUTPUT_FILE"
+  else
+    log "[失败] 连接 iperf3 服务器 $host:$port 失败"
+    echo "$result" | tail -3 | tee -a "$OUTPUT_FILE"
+  fi
 }
 
 # ========== 开始检测 ==========
@@ -188,38 +205,25 @@ else
   log "[跳过] dig 未安装，无法测试 DNS 解析速度"
 fi
 
-# 5. 带宽测速 (指定中国大陆节点，而非默认就近节点)
-divider "5. 带宽测速 (speedtest-cli -> 中国大陆节点)"
-check_and_install speedtest-cli speedtest-cli
-CN_SPEEDTEST_DONE=0
-if command -v speedtest-cli >/dev/null 2>&1; then
-  # speedtest-cli 默认自动选延迟最低的节点，不一定在中国大陆；
-  # 这里从服务器列表里筛出国家码为 CN 的节点，强制指定测速目标
-  CN_SERVER_LINE=$(speedtest-cli --list 2>/dev/null | grep -E ", CN\)" | head -n 1)
-  CN_SERVER_ID=$(echo "$CN_SERVER_LINE" | awk -F')' '{print $1}' | tr -d ' ')
-  if [ -n "$CN_SERVER_ID" ]; then
-    log "选定中国大陆测速节点: $CN_SERVER_LINE"
-    speedtest-cli --server "$CN_SERVER_ID" --simple 2>&1 | tee -a "$OUTPUT_FILE"
-    CN_SPEEDTEST_DONE=1
-  else
-    log "[警告] 服务器列表中未找到中国大陆 (CN) 节点（Ookla 中国节点通常仅对境内 IP 开放测速，境外 VPS 大概率查不到，这是长期已知限制而非临时故障）"
-  fi
+# 5. 带宽测速 (iperf3 -> 自建国内服务器)
+divider "5. 带宽测速 (iperf3)"
+if [ -z "$IPERF3_SERVER" ]; then
+  log "[跳过] 未配置 IPERF3_SERVER。需要一台可公网访问、已运行 'iperf3 -s -D' 的国内服务器，"
+  log "        然后设置环境变量 IPERF3_SERVER=\"服务器IP[:端口]\"（端口默认 5201）后重新运行本脚本"
 else
-  log "[跳过] speedtest-cli 未安装成功。可手动运行:"
-  log "  pip install speedtest-cli --break-system-packages && speedtest-cli --list | grep ', CN)'"
-fi
-
-if [ "$CN_SPEEDTEST_DONE" -eq 0 ]; then
-  if [ -n "$CN_TEST_FILE_URL" ]; then
-    log "改用直连国内测速文件进行下载测速: $CN_TEST_FILE_URL"
-    DL_STATS=$(curl -o /dev/null -s --max-time 30 -w "耗时: %{time_total}s  平均速度: %{speed_download} B/s\n" "$CN_TEST_FILE_URL")
-    log "$DL_STATS"
-  else
-    log "[提示] 未配置 CN_TEST_FILE_URL，改用默认最近节点测速（结果不代表到中国大陆的真实速度）:"
-    if command -v speedtest-cli >/dev/null 2>&1; then
-      speedtest-cli --simple 2>&1 | tee -a "$OUTPUT_FILE"
+  check_and_install iperf3 iperf3
+  if command -v iperf3 >/dev/null 2>&1; then
+    IPERF3_HOST="${IPERF3_SERVER%%:*}"
+    if [[ "$IPERF3_SERVER" == *:* ]]; then
+      IPERF3_PORT="${IPERF3_SERVER##*:}"
+    else
+      IPERF3_PORT=5201
     fi
-    log "[建议] 可在脚本顶部把 CN_TEST_FILE_URL 设为一个国内可公开访问的大文件直链（如阿里云OSS/腾讯云COS上的公开对象），用 curl 直接测下载速度，比依赖 speedtest-cli 的中国节点更可靠"
+    log "目标服务器: $IPERF3_HOST:$IPERF3_PORT"
+    run_iperf3 "$IPERF3_HOST" "$IPERF3_PORT" "" "上行 (VPS -> 服务器)"
+    run_iperf3 "$IPERF3_HOST" "$IPERF3_PORT" "-R" "下行 (服务器 -> VPS)"
+  else
+    log "[跳过] iperf3 未安装成功。可手动运行: apt-get install -y iperf3 / yum install -y iperf3"
   fi
 fi
 
